@@ -106,6 +106,17 @@ davranış hatanın derinlikle artması — kabaca plain20 ≈ %9-10'dan plain56
 | `--warmup-epochs` | `0` | resnet110/1202 için `1` önerilir |
 | `--stem` | `cifar` | sadece ImageNet ailesi için |
 
+## Görselleştirme
+
+```bash
+python plot_results.py logs/resnet20.csv              # tek koşu: error + loss panelleri
+python plot_results.py logs/*.csv -o comparison.png   # tüm koşular üst üste (plain kesikli)
+```
+
+Tek koşuda LR düşüşleri ve en iyi test error işaretlenir, makale değeri
+yeşil çizgiyle gösterilir. Çoklu modda her modelin test error eğrisi
+karşılaştırılır — plain vs resnet eğrilerini (Fig. 6) yeniden üretir.
+
 ## Tahmin / test
 
 Eğitilmiş bir checkpoint ile test setinden rastgele resimleri sınıflandırıp
