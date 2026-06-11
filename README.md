@@ -106,6 +106,17 @@ davranış hatanın derinlikle artması — kabaca plain20 ≈ %9-10'dan plain56
 | `--warmup-epochs` | `0` | resnet110/1202 için `1` önerilir |
 | `--stem` | `cifar` | sadece ImageNet ailesi için |
 
+## Tahmin / test
+
+Eğitilmiş bir checkpoint ile test setinden rastgele resimleri sınıflandırıp
+confidence ile basar, `predictions.png` olarak grid kaydeder (yeşil başlık =
+doğru, kırmızı = yanlış):
+
+```bash
+python predict.py checkpoints/resnet20_best.pt
+python predict.py checkpoints/resnet20_best.pt --num-images 16 --seed 42
+```
+
 Sanity check — tüm modellerin parametre sayısını ve forward shape'ini basar
 (CIFAR modelleri makaledekiyle birebir: 0.27M / 0.46M / 0.66M / 0.85M / 1.7M / 19.4M):
 

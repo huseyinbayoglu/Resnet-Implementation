@@ -13,3 +13,4 @@ checkpoints/
 .venv/
 venv/
 env/
+predictions.png
