@@ -14,7 +14,6 @@ Usage:
     python train.py plain20                       # non-residual baseline
     python train.py resnet110 --warmup-epochs 1
     python train.py resnet34 --stem cifar         # ImageNet net on CIFAR
-    python train.py resnet38                      # any 6n+2 depth works
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
-from model import IMAGENET_MODELS, build_model, resolve_model
+from model import IMAGENET_MODELS, MODELS, build_model
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
@@ -77,6 +76,7 @@ def evaluate(model, loader, device) -> tuple[float, float]:
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, epoch: int,
+                    amp: bool = False,
                     log_interval: int = 100) -> tuple[float, float, float]:
     model.train()
     running_loss, correct, total = 0.0, 0, 0
@@ -84,8 +84,11 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch: int,
     for i, (x, y) in enumerate(loader):
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(x)
-        loss = criterion(logits, y)
+        # bf16 autocast: faster on Ampere+ GPUs (A100), no loss scaling needed.
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
+                            enabled=amp):
+            logits = model(x)
+            loss = criterion(logits, y)
         loss.backward()
         optimizer.step()
 
@@ -102,13 +105,10 @@ def train_one_epoch(model, loader, optimizer, criterion, device, epoch: int,
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train ResNet on CIFAR-10")
     p.add_argument("model", nargs="?", default="resnet20",
-                   help="resnet18/34/50/101/152 (ImageNet family), or any "
-                        "CIFAR-style name with a 6n+2 depth: resnet20, "
-                        "resnet56, plain20, plain56, resnet38, ... "
-                        "(default: resnet20)")
-    p.add_argument("--shortcut", default=None, choices=["A", "B", "C"],
-                   help="Shortcut option (default: A for CIFAR nets, "
-                        "B for ImageNet nets).")
+                   choices=sorted(MODELS),
+                   help="resnet20/32/44/56/110 (CIFAR), plain20/.../110 "
+                        "(non-residual baseline), or resnet18/34/50/101/152 "
+                        "(ImageNet family). Default: resnet20")
     p.add_argument("--stem", default="cifar", choices=["cifar", "imagenet"],
                    help="Stem for ImageNet-family models (resnet18/34/...). "
                         "CIFAR-family models always use the cifar stem.")
@@ -127,20 +127,15 @@ def parse_args() -> argparse.Namespace:
                         "resnet110/1202.")
     p.add_argument("--data-dir", default="./data")
     p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--amp", action="store_true",
+                   help="bf16 mixed precision (faster on A100 / Ampere+).")
     p.add_argument("--out-dir", default="./checkpoints")
     p.add_argument("--log-dir", default="./logs",
                    help="Per-epoch CSV and final summary JSON go here.")
     p.add_argument("--run-name", default=None,
                    help="Log/checkpoint file prefix (default: model name).")
     p.add_argument("--seed", type=int, default=0)
-    args = p.parse_args()
-    try:
-        resolve_model(args.model)
-    except ValueError as e:
-        p.error(str(e))
-    if args.shortcut is not None and args.model.startswith("plain"):
-        p.error("--shortcut does not apply to plain (non-residual) models")
-    return args
+    return p.parse_args()
 
 
 def main():
@@ -162,11 +157,7 @@ def main():
     train_loader, test_loader = get_loaders(args.data_dir, args.batch_size,
                                             args.num_workers)
 
-    model_kwargs = {}
-    if args.shortcut is not None:
-        model_kwargs["shortcut"] = args.shortcut
-    if args.model in IMAGENET_MODELS:
-        model_kwargs["stem"] = args.stem
+    model_kwargs = {"stem": args.stem} if args.model in IMAGENET_MODELS else {}
     model = build_model(args.model, num_classes=10, **model_kwargs).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"model: {args.model}  params={n_params:.2f}M  {model_kwargs}")
@@ -197,7 +188,8 @@ def main():
                 g["lr"] = args.lr
 
         tr_loss, tr_acc, dt = train_one_epoch(model, train_loader, optimizer,
-                                              criterion, device, epoch)
+                                              criterion, device, epoch,
+                                              amp=args.amp)
         te_loss, te_acc = evaluate(model, test_loader, device)
         cur_lr = optimizer.param_groups[0]["lr"]
         print(f"[epoch {epoch:3d}/{args.epochs}] lr={cur_lr:.4f}  "

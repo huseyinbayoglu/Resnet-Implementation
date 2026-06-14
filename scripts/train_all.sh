@@ -2,32 +2,40 @@
 # Train the paper's CIFAR-10 ResNets back to back and compare with Table 6.
 # Run from the repo root (ideally inside tmux):  bash scripts/train_all.sh
 #
-# Override the model list or epochs via env vars:
+# Override via env vars:
 #   MODELS="resnet20 resnet56" bash scripts/train_all.sh
 #   EPOCHS=82 bash scripts/train_all.sh        # quick half-schedule run
+#   AMP=1 NUM_WORKERS=8 bash scripts/train_all.sh   # fast on A100
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Plain (non-residual) baselines first, then the ResNets: with depth, plain
-# error goes UP while ResNet error goes DOWN (paper Fig. 6).
-MODELS=${MODELS:-"plain20 plain32 plain44 plain56 resnet20 resnet32 resnet44 resnet56 resnet110"}
+# Depth comparison for the degradation problem (paper Fig. 6): plain error
+# goes UP with depth, ResNet error goes DOWN. Default = 3 depths x 2 types.
+MODELS=${MODELS:-"plain20 plain56 plain110 resnet20 resnet56 resnet110"}
 EPOCHS=${EPOCHS:-164}
 SEED=${SEED:-0}
+NUM_WORKERS=${NUM_WORKERS:-4}
+AMP=${AMP:-0}
+
+amp_flag=""
+[ "$AMP" = "1" ] && amp_flag="--amp"
 
 mkdir -p logs
 
 for model in $MODELS; do
-    # Paper warms up resnet110/1202 with a lower LR (Sec. 4.2).
+    # Very deep nets need a lower-LR warmup to start converging (Sec. 4.2);
+    # this matters for the 110-layer plain net especially.
     warmup=0
-    case "$model" in resnet110|resnet1202) warmup=1 ;; esac
+    case "$model" in resnet110|resnet1202|plain110|plain1202) warmup=1 ;; esac
 
-    echo "=== training $model (epochs=$EPOCHS warmup=$warmup seed=$SEED) ==="
+    echo "=== training $model (epochs=$EPOCHS warmup=$warmup seed=$SEED amp=$AMP) ==="
     python train.py "$model" \
         --epochs "$EPOCHS" \
         --warmup-epochs "$warmup" \
         --seed "$SEED" \
-        --num-workers 4 \
+        --num-workers "$NUM_WORKERS" \
+        $amp_flag \
         2>&1 | tee "logs/${model}.train.log"
 done
 

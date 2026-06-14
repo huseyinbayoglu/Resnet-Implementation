@@ -1,201 +1,171 @@
 """
-ResNet implementation following:
-  "Deep Residual Learning for Image Recognition", He et al., 2015.
-  https://arxiv.org/abs/1512.03385
+ResNet — "Deep Residual Learning for Image Recognition", He et al., 2015.
+https://arxiv.org/abs/1512.03385
 
-Blocks
-- BasicBlock : 2 x 3x3 conv                 (ResNet-18/34 and all CIFAR nets)
-- Bottleneck : 1x1 -> 3x3 -> 1x1            (ResNet-50/101/152)
+Two building blocks (paper Fig. 5), defined separately and explicitly:
+  BasicBlock : 3x3 -> 3x3                 (ResNet-18/34 and all CIFAR nets)
+  Bottleneck : 1x1 -> 3x3 -> 1x1          (ResNet-50/101/152)
 
-Shortcuts (paper Sec. 3.3 / 4.1)
-- 'A'    : identity; zero-padding when channels increase (parameter-free)
-- 'B'    : identity; 1x1 conv projection only when dims change
-- 'C'    : 1x1 conv projection on every shortcut
-- 'none' : no skip connection at all -> the "plain" baseline networks the
-           paper compares against (Fig. 4 left / Fig. 6 left)
+The shortcut matches the block INPUT to the block OUTPUT when they differ:
+  CIFAR  (Sec. 4.2) : zero-padding, parameter-free   (option A)
+  ImageNet (Table 1): 1x1 conv projection            (option B)
 
-Architectures
-- ImageNet (Table 1): 7x7 s2 stem + maxpool, 4 stages of 64/128/256/512.
-- CIFAR-10 (Sec. 4.2): 3x3 stem, 3 stages of 16/32/64, depth 6n+2,
-  option A shortcuts -> resnet20/32/44/56/110/1202.
-  Plain (non-residual) counterparts -> plain20/32/44/56/110.
-
-Weight init: He (Kaiming) normal for conv layers, BN weight=1, bias=0.
+A `plain` net is the same network with the skip connections removed; it is
+the non-residual baseline whose error grows with depth (paper Fig. 6).
 """
-
-from __future__ import annotations
-
-import re
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def conv3x3(in_c: int, out_c: int, stride: int = 1) -> nn.Conv2d:
-    return nn.Conv2d(in_c, out_c, kernel_size=3, stride=stride,
+def conv3x3(in_ch, out_ch, stride=1):
+    return nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride,
                      padding=1, bias=False)
 
 
-def conv1x1(in_c: int, out_c: int, stride: int = 1) -> nn.Conv2d:
-    return nn.Conv2d(in_c, out_c, kernel_size=1, stride=stride, bias=False)
+def conv1x1(in_ch, out_ch, stride=1):
+    return nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False)
 
 
-class PadShortcut(nn.Module):
-    """Option A: parameter-free shortcut.
+class ZeroPadShortcut(nn.Module):
+    """Option A shortcut: subsample (stride) and pad the extra channels with
+    zeros. No parameters (paper Sec. 3.3)."""
 
-    Subsamples spatially when stride > 1 and zero-pads extra channels
-    (paper Sec. 3.3: "extra zero entries padded for increasing dimensions").
-    """
-
-    def __init__(self, in_planes: int, out_planes: int, stride: int = 1):
+    def __init__(self, stride, pad_channels):
         super().__init__()
         self.stride = stride
-        self.extra_channels = out_planes - in_planes
+        self.pad_channels = pad_channels
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         if self.stride > 1:
             x = x[:, :, ::self.stride, ::self.stride]
-        if self.extra_channels > 0:
-            x = F.pad(x, (0, 0, 0, 0, 0, self.extra_channels))
-        return x
+        return F.pad(x, (0, 0, 0, 0, 0, self.pad_channels))
+
+
+def make_shortcut(in_ch, out_ch, stride, projection):
+    """Skip path matching the block INPUT (in_ch) to its OUTPUT (out_ch).
+    None means identity (dimensions already match)."""
+    if in_ch == out_ch and stride == 1:
+        return None
+    if projection:                                    # option B: 1x1 conv
+        return nn.Sequential(conv1x1(in_ch, out_ch, stride),
+                             nn.BatchNorm2d(out_ch))
+    return ZeroPadShortcut(stride, out_ch - in_ch)    # option A: zero-pad
 
 
 class BasicBlock(nn.Module):
-    expansion = 1
+    """Two 3x3 convolutions: in_ch -> out_ch -> out_ch."""
 
-    def __init__(self, in_planes: int, planes: int, stride: int = 1,
-                 shortcut: nn.Module | None = None, residual: bool = True):
+    def __init__(self, in_ch, out_ch, stride=1, projection=False, residual=True):
         super().__init__()
-        self.conv1 = conv3x3(in_planes, planes, stride)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = conv3x3(planes, planes)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.shortcut = shortcut
+        self.conv1 = conv3x3(in_ch, out_ch, stride)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = conv3x3(out_ch, out_ch)
+        self.bn2 = nn.BatchNorm2d(out_ch)
         self.residual = residual
+        self.shortcut = make_shortcut(in_ch, out_ch, stride, projection) \
+            if residual else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         if self.residual:
             out = out + (x if self.shortcut is None else self.shortcut(x))
-        return F.relu(out, inplace=True)
+        return F.relu(out)
 
 
 class Bottleneck(nn.Module):
-    expansion = 4
+    """1x1 -> 3x3 -> 1x1. The 3x3 runs at the narrow `mid_ch`; the block
+    inputs/outputs `out_ch` (paper Fig. 5: in/out 256, mid 64)."""
 
-    def __init__(self, in_planes: int, planes: int, stride: int = 1,
-                 shortcut: nn.Module | None = None, residual: bool = True):
+    def __init__(self, in_ch, mid_ch, out_ch, stride=1, projection=True,
+                 residual=True):
         super().__init__()
-        # The paper does not pin down where the stride goes; the original
-        # Caffe code strided the first 1x1. We stride the 3x3 ("v1.5",
-        # torchvision default), which avoids dropping activations.
-        self.conv1 = conv1x1(in_planes, planes)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = conv3x3(planes, planes, stride)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = conv1x1(planes, planes * self.expansion)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        self.shortcut = shortcut
+        self.conv1 = conv1x1(in_ch, mid_ch)               # reduce
+        self.bn1 = nn.BatchNorm2d(mid_ch)
+        self.conv2 = conv3x3(mid_ch, mid_ch, stride)      # bottleneck 3x3
+        self.bn2 = nn.BatchNorm2d(mid_ch)
+        self.conv3 = conv1x1(mid_ch, out_ch)              # restore
+        self.bn3 = nn.BatchNorm2d(out_ch)
         self.residual = residual
+        self.shortcut = make_shortcut(in_ch, out_ch, stride, projection) \
+            if residual else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
-        out = F.relu(self.bn2(self.conv2(out)), inplace=True)
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
         if self.residual:
             out = out + (x if self.shortcut is None else self.shortcut(x))
-        return F.relu(out, inplace=True)
+        return F.relu(out)
 
 
 class ResNet(nn.Module):
-    """Generic ResNet: stage widths double from `base_planes`, one stage per
-    entry in `layers`. Covers both the ImageNet nets (4 stages from 64) and
-    the CIFAR nets (3 stages from 16)."""
+    """Assembles stem + stages + classifier. `stages` is a list of specs,
+    one per resolution, with the channel numbers written out explicitly:
+        ("basic", out_ch, n_blocks, stride)
+        ("bottleneck", mid_ch, out_ch, n_blocks, stride)"""
 
-    def __init__(self, block: type, layers: list[int], num_classes: int,
-                 stem: str = "imagenet", base_planes: int = 64,
-                 shortcut: str = "B"):
+    def __init__(self, stem, stages, num_classes, residual=True):
         super().__init__()
-        if stem not in ("imagenet", "cifar"):
-            raise ValueError(f"unknown stem {stem!r}")
-        if shortcut not in ("A", "B", "C", "none"):
-            raise ValueError(f"unknown shortcut option {shortcut!r}")
-        self.shortcut_option = shortcut
-        self.residual = shortcut != "none"
-        self.in_planes = base_planes
+        self.residual = residual
+        self.projection = (stem == "imagenet")   # B for ImageNet, A for CIFAR
 
-        if stem == "imagenet":
+        if stem == "imagenet":                   # 224x224 input
+            base = 64
             self.stem = nn.Sequential(
-                nn.Conv2d(3, base_planes, kernel_size=7, stride=2, padding=3,
-                          bias=False),
-                nn.BatchNorm2d(base_planes),
-                nn.ReLU(inplace=True),
+                nn.Conv2d(3, base, kernel_size=7, stride=2, padding=3, bias=False),
+                nn.BatchNorm2d(base),
+                nn.ReLU(),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             )
-        else:  # cifar: 3x3 stride-1 conv, no maxpool (32x32 input)
+        else:                                    # cifar: 32x32, no maxpool
+            base = 16
             self.stem = nn.Sequential(
-                conv3x3(3, base_planes),
-                nn.BatchNorm2d(base_planes),
-                nn.ReLU(inplace=True),
+                conv3x3(3, base),
+                nn.BatchNorm2d(base),
+                nn.ReLU(),
             )
+        self.in_ch = base
 
-        stages = []
-        for i, blocks in enumerate(layers):
-            planes = base_planes * 2 ** i
-            stages.append(self._make_stage(block, planes, blocks,
-                                           stride=1 if i == 0 else 2))
-        self.stages = nn.Sequential(*stages)
+        self.stages = nn.Sequential(*[self._make_stage(spec) for spec in stages])
 
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Linear(self.in_planes, num_classes)
-
+        self.fc = nn.Linear(self.in_ch, num_classes)
         self._init_weights()
 
-    def _make_shortcut(self, in_planes: int, out_planes: int,
-                       stride: int) -> nn.Module | None:
-        if self.shortcut_option == "none":
-            return None
-        dims_change = stride != 1 or in_planes != out_planes
-        if self.shortcut_option == "A":
-            return PadShortcut(in_planes, out_planes, stride) if dims_change else None
-        if self.shortcut_option == "B" and not dims_change:
-            return None
-        # B with changed dims, or C always: 1x1 projection
-        return nn.Sequential(
-            conv1x1(in_planes, out_planes, stride),
-            nn.BatchNorm2d(out_planes),
-        )
-
-    def _make_stage(self, block: type, planes: int, blocks: int,
-                    stride: int) -> nn.Sequential:
-        out_planes = planes * block.expansion
-        layers = []
-        for i in range(blocks):
-            block_stride = stride if i == 0 else 1
-            shortcut = self._make_shortcut(self.in_planes, out_planes,
-                                           block_stride)
-            layers.append(block(self.in_planes, planes, block_stride,
-                                shortcut, residual=self.residual))
-            self.in_planes = out_planes
-        return nn.Sequential(*layers)
+    def _make_stage(self, spec):
+        """Stack one resolution's blocks. Only the first block downsamples
+        (uses `stride`) and changes the channel count; the rest keep
+        dimensions, so their shortcut is a plain identity. `self.in_ch` chains
+        each block's input to the previous block's output."""
+        kind = spec[0]
+        n_blocks, stride = spec[-2], spec[-1]
+        blocks = []
+        for i in range(n_blocks):
+            s = stride if i == 0 else 1
+            if kind == "basic":
+                out_ch = spec[1]
+                blocks.append(BasicBlock(self.in_ch, out_ch, s,
+                                         self.projection, self.residual))
+            else:
+                mid_ch, out_ch = spec[1], spec[2]
+                blocks.append(Bottleneck(self.in_ch, mid_ch, out_ch, s,
+                                         self.projection, self.residual))
+            self.in_ch = out_ch
+        return nn.Sequential(*blocks)
 
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                # He init, paper Sec. 3.4
                 nn.init.kaiming_normal_(m.weight, mode="fan_out",
                                         nonlinearity="relu")
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out",
-                                        nonlinearity="relu")
-                nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = self.stem(x)
         x = self.stages(x)
         x = self.avgpool(x)
@@ -203,121 +173,79 @@ class ResNet(nn.Module):
         return self.fc(x)
 
 
-# --------------------------------------------------------------------------
-# ImageNet architectures (Table 1)
-# --------------------------------------------------------------------------
+# --- CIFAR models (Sec. 4.2): 3 stages of {16, 32, 64}, depth 6n+2 --------
 
-def _imagenet_resnet(block, layers):
-    def factory(num_classes: int = 1000, stem: str = "imagenet",
-                shortcut: str = "B") -> ResNet:
-        return ResNet(block, layers, num_classes, stem=stem,
-                      base_planes=64, shortcut=shortcut)
-    return factory
-
-
-resnet18  = _imagenet_resnet(BasicBlock, [2, 2, 2, 2])
-resnet34  = _imagenet_resnet(BasicBlock, [3, 4, 6, 3])
-resnet50  = _imagenet_resnet(Bottleneck, [3, 4, 6, 3])
-resnet101 = _imagenet_resnet(Bottleneck, [3, 4, 23, 3])
-resnet152 = _imagenet_resnet(Bottleneck, [3, 8, 36, 3])
+def _cifar(n, num_classes, residual):
+    stages = [
+        ("basic", 16, n, 1),     # 32x32, no downsample
+        ("basic", 32, n, 2),     # -> 16x16
+        ("basic", 64, n, 2),     # -> 8x8
+    ]
+    return ResNet("cifar", stages, num_classes, residual=residual)
 
 
-# --------------------------------------------------------------------------
-# CIFAR-10 architectures (Sec. 4.2): depth = 6n + 2, option A shortcuts.
-# Plain nets are the same topology with no skip connections (Fig. 6 left):
-# the baseline whose error *increases* with depth, motivating ResNets.
-# --------------------------------------------------------------------------
+def resnet20(num_classes=10):   return _cifar(3,  num_classes, residual=True)
+def resnet32(num_classes=10):   return _cifar(5,  num_classes, residual=True)
+def resnet44(num_classes=10):   return _cifar(7,  num_classes, residual=True)
+def resnet56(num_classes=10):   return _cifar(9,  num_classes, residual=True)
+def resnet110(num_classes=10):  return _cifar(18, num_classes, residual=True)
+def resnet1202(num_classes=10): return _cifar(200, num_classes, residual=True)
 
-def _cifar_layers(depth: int) -> list[int]:
-    if (depth - 2) % 6 != 0:
-        raise ValueError("CIFAR net depth must be 6n + 2")
-    n = (depth - 2) // 6
-    return [n, n, n]
-
-
-def _cifar_resnet(depth: int):
-    def factory(num_classes: int = 10, shortcut: str = "A") -> ResNet:
-        return ResNet(BasicBlock, _cifar_layers(depth), num_classes,
-                      stem="cifar", base_planes=16, shortcut=shortcut)
-    return factory
+def plain20(num_classes=10):    return _cifar(3,  num_classes, residual=False)
+def plain32(num_classes=10):    return _cifar(5,  num_classes, residual=False)
+def plain44(num_classes=10):    return _cifar(7,  num_classes, residual=False)
+def plain56(num_classes=10):    return _cifar(9,  num_classes, residual=False)
+def plain110(num_classes=10):   return _cifar(18, num_classes, residual=False)
 
 
-def _cifar_plain(depth: int):
-    def factory(num_classes: int = 10) -> ResNet:
-        return ResNet(BasicBlock, _cifar_layers(depth), num_classes,
-                      stem="cifar", base_planes=16, shortcut="none")
-    return factory
+# --- ImageNet models (Table 1) --------------------------------------------
+
+def resnet18(num_classes=1000, stem="imagenet"):
+    stages = [("basic", 64, 2, 1), ("basic", 128, 2, 2),
+              ("basic", 256, 2, 2), ("basic", 512, 2, 2)]
+    return ResNet(stem, stages, num_classes)
 
 
-resnet20   = _cifar_resnet(20)
-resnet32   = _cifar_resnet(32)
-resnet44   = _cifar_resnet(44)
-resnet56   = _cifar_resnet(56)
-resnet110  = _cifar_resnet(110)
-resnet1202 = _cifar_resnet(1202)
-
-plain20  = _cifar_plain(20)
-plain32  = _cifar_plain(32)
-plain44  = _cifar_plain(44)
-plain56  = _cifar_plain(56)
-plain110 = _cifar_plain(110)
+def resnet34(num_classes=1000, stem="imagenet"):
+    stages = [("basic", 64, 3, 1), ("basic", 128, 4, 2),
+              ("basic", 256, 6, 2), ("basic", 512, 3, 2)]
+    return ResNet(stem, stages, num_classes)
 
 
-IMAGENET_MODELS = {
-    "resnet18": resnet18,
-    "resnet34": resnet34,
-    "resnet50": resnet50,
-    "resnet101": resnet101,
-    "resnet152": resnet152,
-}
+def resnet50(num_classes=1000, stem="imagenet"):
+    # ("bottleneck", mid_ch, out_ch, n_blocks, stride) — out is 4x mid (Table 1)
+    stages = [("bottleneck", 64, 256, 3, 1), ("bottleneck", 128, 512, 4, 2),
+              ("bottleneck", 256, 1024, 6, 2), ("bottleneck", 512, 2048, 3, 2)]
+    return ResNet(stem, stages, num_classes)
 
-CIFAR_MODELS = {
-    "resnet20": resnet20,
-    "resnet32": resnet32,
-    "resnet44": resnet44,
-    "resnet56": resnet56,
-    "resnet110": resnet110,
-    "resnet1202": resnet1202,
-}
 
-PLAIN_MODELS = {
-    "plain20": plain20,
-    "plain32": plain32,
-    "plain44": plain44,
-    "plain56": plain56,
-    "plain110": plain110,
-}
+def resnet101(num_classes=1000, stem="imagenet"):
+    stages = [("bottleneck", 64, 256, 3, 1), ("bottleneck", 128, 512, 4, 2),
+              ("bottleneck", 256, 1024, 23, 2), ("bottleneck", 512, 2048, 3, 2)]
+    return ResNet(stem, stages, num_classes)
 
+
+def resnet152(num_classes=1000, stem="imagenet"):
+    stages = [("bottleneck", 64, 256, 3, 1), ("bottleneck", 128, 512, 8, 2),
+              ("bottleneck", 256, 1024, 36, 2), ("bottleneck", 512, 2048, 3, 2)]
+    return ResNet(stem, stages, num_classes)
+
+
+IMAGENET_MODELS = {"resnet18": resnet18, "resnet34": resnet34,
+                   "resnet50": resnet50, "resnet101": resnet101,
+                   "resnet152": resnet152}
+CIFAR_MODELS = {"resnet20": resnet20, "resnet32": resnet32,
+                "resnet44": resnet44, "resnet56": resnet56,
+                "resnet110": resnet110, "resnet1202": resnet1202}
+PLAIN_MODELS = {"plain20": plain20, "plain32": plain32, "plain44": plain44,
+                "plain56": plain56, "plain110": plain110}
 MODELS = {**IMAGENET_MODELS, **CIFAR_MODELS, **PLAIN_MODELS}
 
-_CIFAR_NAME = re.compile(r"^(resnet|plain)(\d+)$")
 
-
-def resolve_model(name: str):
-    """Return a model factory for `name`, raising ValueError if invalid.
-
-    Besides the predefined names, any CIFAR-style name with a valid 6n+2
-    depth works: resolve_model("resnet38"), resolve_model("plain26"), ...
-    """
-    if name in MODELS:
-        return MODELS[name]
-    m = _CIFAR_NAME.match(name)
-    if m:
-        family, depth = m.group(1), int(m.group(2))
-        rem = (depth - 2) % 6
-        if rem != 0:
-            lo, hi = depth - rem, depth - rem + 6
-            raise ValueError(
-                f"{name}: CIFAR {family} depth must be 6n+2 "
-                f"(nearest valid: {family}{lo}, {family}{hi})")
-        return _cifar_plain(depth) if family == "plain" else _cifar_resnet(depth)
-    raise ValueError(f"unknown model {name!r}; use one of {list(MODELS)} "
-                     f"or resnet/plain with a 6n+2 depth (e.g. resnet38)")
-
-
-def build_model(name: str, num_classes: int = 10, **kwargs) -> ResNet:
-    """kwargs: `shortcut` for resnet models, `stem` for ImageNet models only."""
-    return resolve_model(name)(num_classes=num_classes, **kwargs)
+def build_model(name, num_classes=10, **kwargs):
+    if name not in MODELS:
+        raise ValueError(f"unknown model {name}, choose from {list(MODELS)}")
+    return MODELS[name](num_classes=num_classes, **kwargs)
 
 
 if __name__ == "__main__":
@@ -325,6 +253,5 @@ if __name__ == "__main__":
     for name in MODELS:
         kwargs = {"stem": "cifar"} if name in IMAGENET_MODELS else {}
         m = build_model(name, num_classes=10, **kwargs)
-        y = m(x)
         params = sum(p.numel() for p in m.parameters()) / 1e6
-        print(f"{name:10s}  out={tuple(y.shape)}  params={params:.2f}M")
+        print(f"{name:10s}  out={tuple(m(x).shape)}  params={params:.2f}M")

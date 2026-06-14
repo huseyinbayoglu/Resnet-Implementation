@@ -33,3 +33,5 @@ echo
 echo "Setup OK. Start training with:"
 echo "  tmux new -s train"
 echo "  bash scripts/train_all.sh"
+
+

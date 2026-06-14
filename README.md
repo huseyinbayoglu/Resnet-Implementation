@@ -5,22 +5,18 @@ Implementation of *Deep Residual Learning for Image Recognition*
 
 ## Models
 
-| family | models | blocks | shortcut default |
-|--------|--------|--------|------------------|
-| ImageNet (Table 1) | `resnet18/34/50/101/152` | BasicBlock / Bottleneck | B (projection when dims change) |
-| CIFAR-10 (Sec. 4.2) | `resnet20/32/44/56/110/1202` | BasicBlock, 3 stages of 16/32/64 | A (zero-pad, parameter-free) |
-| Plain baseline (Fig. 6) | `plain20/32/44/56/110` | aynı topoloji, **skip connection yok** | — |
+| family | models | blok | shortcut |
+|--------|--------|------|----------|
+| CIFAR-10 (Sec. 4.2) | `resnet20/32/44/56/110/1202` | BasicBlock, 3 stage × {16,32,64} | A: zero-pad (parametresiz) |
+| Plain baseline (Fig. 6) | `plain20/32/44/56/110` | aynı ağ, **skip connection yok** | — |
+| ImageNet (Table 1) | `resnet18/34/50/101/152` | BasicBlock / Bottleneck | B: 1×1 conv projection |
 
-Plain modeller residual bağlantı olmadan aynı ağdır (option A parametre
-içermediği için parametre sayıları ResNet'le birebir aynı). Amaç makalenin
-ana motivasyonunu (degradation problem) yeniden üretmek: derinlik arttıkça
-plain ağların hatası **artar**, ResNet'lerin hatası **düşer**.
+Plain modeller residual bağlantısı olmayan aynı ağdır (zero-pad shortcut
+parametresiz olduğu için parametre sayıları ResNet'le birebir aynı). Amaç
+makalenin ana motivasyonunu (degradation problem) göstermek: derinlik
+arttıkça plain ağların hatası **artar**, ResNet'lerin hatası **düşer**.
 
-- Shortcut options **A** (zero-padding identity), **B** (projection when dims
-  change), **C** (projection everywhere) — selectable via `--shortcut`
-- ImageNet models also accept `--stem cifar` (3×3 s1 stem, no maxpool) to run
-  on 32×32 input
-- Kaiming/He normal init for conv & linear weights, BN γ=1, β=0
+Kaiming/He normal init, BatchNorm γ=1, β=0.
 
 ## Train on CIFAR-10
 
@@ -30,12 +26,7 @@ python train.py resnet20                      # paper recipe
 python train.py plain20                       # residual'sız baseline
 python train.py resnet110 --warmup-epochs 1   # paper warms up 110/1202
 python train.py resnet34 --stem cifar         # ImageNet net on CIFAR
-python train.py resnet38                      # herhangi bir 6n+2 derinlik
 ```
-
-Model adı pozisyonel: `resnet<depth>` veya `plain<depth>` yaz, geçerli her
-6n+2 derinlik (20, 26, 32, 38, 44, ...) isimden otomatik üretilir. Geçersiz
-derinlikte (örn. `resnet36`) en yakın geçerli derinlikler önerilir.
 
 Defaults follow the paper's recipe: SGD momentum 0.9, weight decay 1e-4,
 batch 128, LR 0.1 ÷10 at epochs 82/123 (≈32k/48k iters), 164 epochs (≈64k
@@ -97,8 +88,7 @@ davranış hatanın derinlikle artması — kabaca plain20 ≈ %9-10'dan plain56
 
 | flag | default | notes |
 |------|---------|-------|
-| `model` (pozisyonel) | `resnet20` | `resnet<6n+2>` / `plain<6n+2>` / ImageNet ailesi |
-| `--shortcut` | model default | `A` / `B` / `C` |
+| `model` (pozisyonel) | `resnet20` | `resnet20/32/44/56/110/1202`, `plain20/.../110`, `resnet18/34/50/101/152` |
 | `--epochs` | `164` | paper: 64k iter |
 | `--batch-size` | `128` | |
 | `--lr` | `0.1` | SGD, momentum 0.9, wd 1e-4 |
