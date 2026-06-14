@@ -14,6 +14,9 @@ cd "$(dirname "$0")/.."
 # goes UP with depth, ResNet error goes DOWN. Default = 3 depths x 2 types.
 MODELS=${MODELS:-"plain20 plain56 plain110 resnet20 resnet56 resnet110"}
 EPOCHS=${EPOCHS:-164}
+# LR drops at 50% and 75% of training (paper: 32k/48k of 64k iters), so the
+# schedule scales automatically when you shorten EPOCHS for a quick run.
+MILESTONES=${MILESTONES:-"$((EPOCHS / 2)) $((EPOCHS * 3 / 4))"}
 SEED=${SEED:-0}
 NUM_WORKERS=${NUM_WORKERS:-4}
 AMP=${AMP:-0}
@@ -29,9 +32,10 @@ for model in $MODELS; do
     warmup=0
     case "$model" in resnet110|resnet1202|plain110|plain1202) warmup=1 ;; esac
 
-    echo "=== training $model (epochs=$EPOCHS warmup=$warmup seed=$SEED amp=$AMP) ==="
+    echo "=== training $model (epochs=$EPOCHS milestones=$MILESTONES warmup=$warmup amp=$AMP) ==="
     python train.py "$model" \
         --epochs "$EPOCHS" \
+        --milestones $MILESTONES \
         --warmup-epochs "$warmup" \
         --seed "$SEED" \
         --num-workers "$NUM_WORKERS" \
