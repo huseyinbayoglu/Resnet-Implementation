@@ -29,26 +29,35 @@ def conv1x1(in_ch, out_ch, stride=1):
 
 
 class ZeroPadShortcut(nn.Module):
-    """Option A shortcut: subsample (stride) and pad the extra channels with
-    zeros. No parameters (paper Sec. 3.3)."""
+    """Option A shortcut (paper Sec. 3.3) — parameter-free.
 
-    def __init__(self, stride, pad_channels):
+    Matches the block's input to its output when dimensions change, with no
+    learned weights:
+      1. if the block downsamples (stride > 1), subsample the input the same way;
+      2. append `added_channels` all-zero channels so the channel count matches.
+    """
+
+    def __init__(self, stride, added_channels):
         super().__init__()
         self.stride = stride
-        self.pad_channels = pad_channels
+        self.added_channels = added_channels
 
     def forward(self, x):
+        # 1) spatial downsample: keep every `stride`-th pixel along H and W
         if self.stride > 1:
             x = x[:, :, ::self.stride, ::self.stride]
-        return F.pad(x, (0, 0, 0, 0, 0, self.pad_channels))
+        # 2) concatenate zero-filled channels so the channels match the output
+        batch, _, height, width = x.shape
+        zeros = x.new_zeros(batch, self.added_channels, height, width)
+        return torch.cat([x, zeros], dim=1)
 
 
 def make_shortcut(in_ch, out_ch, stride, projection):
     """Skip path matching the block INPUT (in_ch) to its OUTPUT (out_ch).
     None means identity (dimensions already match)."""
     if in_ch == out_ch and stride == 1:
-        return None
-    if projection:                                    # option B: 1x1 conv
+        return None         # Identical shortcut
+    if projection:                                   
         return nn.Sequential(conv1x1(in_ch, out_ch, stride),
                              nn.BatchNorm2d(out_ch))
     return ZeroPadShortcut(stride, out_ch - in_ch)    # option A: zero-pad
@@ -64,21 +73,23 @@ class BasicBlock(nn.Module):
         self.conv2 = conv3x3(out_ch, out_ch)
         self.bn2 = nn.BatchNorm2d(out_ch)
         self.residual = residual
-        self.shortcut = make_shortcut(in_ch, out_ch, stride, projection) \
-            if residual else None
+
+        if residual:
+            self.shortcut = make_shortcut(in_ch, out_ch, stride, projection)
+        else:   # plain network
+            None
 
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
+        # added before activation function
         if self.residual:
             out = out + (x if self.shortcut is None else self.shortcut(x))
         return F.relu(out)
 
 
 class Bottleneck(nn.Module):
-    """1x1 -> 3x3 -> 1x1. The 3x3 runs at the narrow `mid_ch`; the block
-    inputs/outputs `out_ch` (paper Fig. 5: in/out 256, mid 64)."""
-
+    """1x1 -> 3x3 -> 1x1"""
     def __init__(self, in_ch, mid_ch, out_ch, stride=1, projection=True,
                  residual=True):
         super().__init__()
@@ -89,8 +100,10 @@ class Bottleneck(nn.Module):
         self.conv3 = conv1x1(mid_ch, out_ch)              # restore
         self.bn3 = nn.BatchNorm2d(out_ch)
         self.residual = residual
-        self.shortcut = make_shortcut(in_ch, out_ch, stride, projection) \
-            if residual else None
+        if residual:
+            self.shortcut = make_shortcut(in_ch, out_ch, stride, projection)
+        else:   # plain network
+            None
 
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
@@ -109,10 +122,10 @@ class ResNet(nn.Module):
 
     def __init__(self, stem, stages, num_classes, residual=True):
         super().__init__()
-        self.residual = residual
+        self.residual = residual # If residual is false then its plain network
         self.projection = (stem == "imagenet")   # B for ImageNet, A for CIFAR
 
-        if stem == "imagenet":                   # 224x224 input
+        if stem == "imagenet":   # 224x224 input
             base = 64
             self.stem = nn.Sequential(
                 nn.Conv2d(3, base, kernel_size=7, stride=2, padding=3, bias=False),
@@ -120,7 +133,7 @@ class ResNet(nn.Module):
                 nn.ReLU(),
                 nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
             )
-        else:                                    # cifar: 32x32, no maxpool
+        else:     # cifar: 32x32, no maxpool
             base = 16
             self.stem = nn.Sequential(
                 conv3x3(3, base),
@@ -128,7 +141,8 @@ class ResNet(nn.Module):
                 nn.ReLU(),
             )
         self.in_ch = base
-
+                #   ("basic",      out_ch,         n_blocks, stride)   # example spec
+                #   ("bottleneck", mid_ch, out_ch, n_blocks, stride)   # example spec
         self.stages = nn.Sequential(*[self._make_stage(spec) for spec in stages])
 
         self.avgpool = nn.AdaptiveAvgPool2d(1)

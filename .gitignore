@@ -4,13 +4,24 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 .obsidian/
+*.png
 
 data/
 checkpoints/
 *.pt
 *.pth
+*.pptx
+
 
 .venv/
 venv/
 env/
 predictions.png
+
+# Yardımcı araçlar — makale implementasyonunun parçası değil
+build_pptx.py
+sunum_plan.md
+compare_results.py
+plot_results.py
+plot_degradation.py
+predict.py
