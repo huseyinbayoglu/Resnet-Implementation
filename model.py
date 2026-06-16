@@ -76,8 +76,8 @@ class BasicBlock(nn.Module):
 
         if residual:
             self.shortcut = make_shortcut(in_ch, out_ch, stride, projection)
-        else:   # plain network
-            None
+        else:   # plain network: no skip connection
+            self.shortcut = None
 
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
@@ -102,8 +102,8 @@ class Bottleneck(nn.Module):
         self.residual = residual
         if residual:
             self.shortcut = make_shortcut(in_ch, out_ch, stride, projection)
-        else:   # plain network
-            None
+        else:   # plain network: no skip connection
+            self.shortcut = None
 
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))

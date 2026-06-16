@@ -44,5 +44,5 @@ for model in $MODELS; do
 done
 
 echo
-echo "=== results vs paper (Table 6) ==="
-python compare_results.py
+echo "Done. Each model's best test error is in logs/<model>.json"
+echo "and the per-epoch curve is in logs/<model>.csv"

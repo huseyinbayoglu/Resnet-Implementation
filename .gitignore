@@ -21,7 +21,12 @@ predictions.png
 # Yardımcı araçlar — makale implementasyonunun parçası değil
 build_pptx.py
 sunum_plan.md
+sunum_metni.md
+sunum_metni_kr.md
+soru_cevap.md
 compare_results.py
 plot_results.py
 plot_degradation.py
 predict.py
+sunum_metni_kr.pdf
+build_pdf.py
